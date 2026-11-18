@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  telegram-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - TELEGRAM_BOT_TOKEN=YOUR_BOT_TOKEN_HERE
+      - CHROME_PATH=/usr/bin/google-chrome

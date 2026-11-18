@@ -1,0 +1,17 @@
+{
+  "name": "order-tracker-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram Bot to query and track live order status and buyer details from Google Apps Script portal",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "keywords": [
+    "telegram-bot",
+    "order-tracker",
+    "google-apps-script",
+    "chrome-devtools-protocol"
+  ],
+  "author": "Ayush Chatterjee",
+  "license": "MIT"
+}

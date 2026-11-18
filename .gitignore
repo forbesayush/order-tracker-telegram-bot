@@ -1,0 +1,12 @@
+# Sensitive credentials
+config.json
+.env
+
+# Dependencies
+node_modules/
+
+# Logs and temporary files
+*.log
+chrome_gas_*
+.DS_Store
+Thumbs.db
