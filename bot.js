@@ -1,8 +1,14 @@
 /**
- * Order Tracker Telegram Bot
+ * Order Tracker Telegram Bot (Single & Batch Mode)
  *
  * Connects to Telegram via long-polling and queries the Google Apps Script
  * Master Order Status portal in real-time using headless Chrome DevTools Protocol.
+ *
+ * Supports:
+ * - Single Order Check (detailed card)
+ * - Batch Order Check (multi-line paste, list, or uploaded .txt/.csv file)
+ * - Live progress tracking
+ * - Automatic CSV report generation & upload
  */
 
 const { spawn } = require('child_process');
@@ -155,7 +161,7 @@ async function initBrowser() {
  */
 async function checkOrder(orderId, retryCount = 1) {
   while (isQuerying) {
-    await sleep(150);
+    await sleep(100);
   }
   isQuerying = true;
 
@@ -234,14 +240,229 @@ async function editTelegram(chatId, messageId, text) {
       body: JSON.stringify(body)
     });
     const data = await res.json();
-    if (!data.ok) {
-      await sendTelegram(chatId, text);
-    }
     return data;
   } catch (err) {
     console.error('[Telegram] Error editing message:', err.message);
-    await sendTelegram(chatId, text);
+    return null;
   }
+}
+
+async function sendTelegramDocument(chatId, bufferOrString, filename, caption = '') {
+  const url = `https://api.telegram.org/bot${BOT_TOKEN}/sendDocument`;
+  const formData = new FormData();
+  formData.append('chat_id', chatId);
+  formData.append('caption', caption);
+  formData.append('document', new Blob([bufferOrString], { type: 'text/csv' }), filename);
+
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      body: formData
+    });
+    return await res.json();
+  } catch (err) {
+    console.error('[Telegram] Error sending document:', err.message);
+    return null;
+  }
+}
+
+async function getTelegramFileContent(fileId) {
+  const fileInfoUrl = `https://api.telegram.org/bot${BOT_TOKEN}/getFile?file_id=${fileId}`;
+  const infoRes = await fetch(fileInfoUrl);
+  const infoData = await infoRes.json();
+  if (!infoData.ok || !infoData.result.file_path) {
+    throw new Error('Failed to retrieve file metadata from Telegram');
+  }
+
+  const downloadUrl = `https://api.telegram.org/file/bot${BOT_TOKEN}/${infoData.result.file_path}`;
+  const fileRes = await fetch(downloadUrl);
+  return await fileRes.text();
+}
+
+/**
+ * Single Order Handler
+ */
+async function handleSingleOrder(chatId, orderId, replyToMessageId) {
+  const progressRes = await sendTelegram(chatId, `🔍 *Checking Order ID:* \`${orderId}\`...`, replyToMessageId);
+  const progressMsgId = progressRes && progressRes.result ? progressRes.result.message_id : null;
+
+  try {
+    const res = await checkOrder(orderId);
+
+    if (!res || !res.success) {
+      const errorText = `⚠️ *Error querying portal:* ${res ? res.err : 'No response from portal'}`;
+      if (progressMsgId) await editTelegram(chatId, progressMsgId, errorText);
+      else await sendTelegram(chatId, errorText, replyToMessageId);
+      return;
+    }
+
+    if (res.res === 'Invalid Order ID' || !res.res) {
+      const notFoundText =
+        `❌ *Order Not Found*\n\n` +
+        `Order ID: \`${orderId}\` is *not in the database*.\n` +
+        `_Tip: It may belong to a newer batch not yet synced to the master sheet._`;
+      if (progressMsgId) await editTelegram(chatId, progressMsgId, notFoundText);
+      else await sendTelegram(chatId, notFoundText, replyToMessageId);
+      return;
+    }
+
+    const d = res.res;
+    const formStatus = (d.step2 === 'Refund Form Filled')
+      ? '✅ *Received & Verified*'
+      : `⏳ ${d.step2 || 'Pending'}`;
+
+    const settlementStatus = (d.step3 === 'Refund Completed')
+      ? '✅ *Completed*'
+      : (d.step3 && d.step3 !== 'Pending')
+        ? `⚠️ ${d.step3}`
+        : '⏳ Processing Payment';
+
+    const reply =
+      `📦 *Order Details*\n` +
+      `━━━━━━━━━━━━━━━━━━━━━━\n` +
+      `🆔 *Order ID:* \`${orderId}\`\n` +
+      `👤 *Buyer:* ${d.buyerName || 'N/A'}\n` +
+      `💰 *Amount:* ₹${d.amount || 0}\n` +
+      `📅 *Order Date:* ${d.orderDate || 'N/A'}\n\n` +
+      `📊 *Status Tracker:*\n` +
+      `1️⃣ *Order Status:* ✅ Confirmed\n` +
+      `2️⃣ *Refund Form:* ${formStatus}\n` +
+      `3️⃣ *Settlement:* ${settlementStatus}`;
+
+    if (progressMsgId) {
+      await editTelegram(chatId, progressMsgId, reply);
+    } else {
+      await sendTelegram(chatId, reply, replyToMessageId);
+    }
+  } catch (err) {
+    console.error('[Error] Lookup failed for', orderId, err);
+    const failText = `⚠️ *Error:* Failed to fetch details for \`${orderId}\` (${err.message})`;
+    if (progressMsgId) await editTelegram(chatId, progressMsgId, failText);
+    else await sendTelegram(chatId, failText, replyToMessageId);
+  }
+}
+
+/**
+ * Batch Orders Handler
+ */
+async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
+  const total = orderIds.length;
+  console.log(`[Batch] Starting verification for ${total} orders...`);
+
+  // Initial progress notice
+  const progressRes = await sendTelegram(
+    chatId,
+    `🔄 *Batch Check Started*\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Total Orders: *${total}*\n⏳ Progress: 0/${total} (0%)\n\n_Please wait, checking database in real-time..._`,
+    replyToMessageId
+  );
+  const progressMsgId = progressRes && progressRes.result ? progressRes.result.message_id : null;
+
+  const foundList = [];
+  const notFoundList = [];
+  let totalAmount = 0;
+  let lastEditTime = Date.now();
+
+  for (let i = 0; i < total; i++) {
+    const orderId = orderIds[i];
+    try {
+      const res = await checkOrder(orderId);
+      if (res && res.success && typeof res.res === 'object' && res.res !== null) {
+        const d = res.res;
+        const amt = parseFloat(d.amount) || 0;
+        totalAmount += amt;
+        foundList.push({
+          orderId,
+          buyerName: d.buyerName || 'N/A',
+          amount: amt,
+          orderDate: d.orderDate || 'N/A',
+          step1: d.step1 || 'Order Placed',
+          step2: d.step2 || 'Pending',
+          step3: d.step3 || 'Pending'
+        });
+      } else {
+        notFoundList.push(orderId);
+      }
+    } catch (err) {
+      notFoundList.push(orderId);
+    }
+
+    // Update progress message periodically (every 3 items or every 2 seconds to avoid Telegram rate limits)
+    const now = Date.now();
+    const isLast = i === total - 1;
+    if (progressMsgId && (now - lastEditTime > 2500 || isLast)) {
+      lastEditTime = now;
+      const pct = Math.round(((i + 1) / total) * 100);
+      await editTelegram(
+        chatId,
+        progressMsgId,
+        `🔄 *Batch Check in Progress*\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Total Orders: *${total}*\n⏳ Checked: *${i + 1}/${total}* (${pct}%)\n✅ Found: *${foundList.length}* | ❌ Not Found: *${notFoundList.length}*`
+      );
+    }
+
+    await sleep(250); // slight breathing room between calls
+  }
+
+  // Build the Final Batch Summary Message
+  let summary =
+    `📊 *Batch Check Complete*\n` +
+    `━━━━━━━━━━━━━━━━━━━━━━\n` +
+    `📦 *Total Orders Checked:* ${total}\n` +
+    `✅ *In Database (Found):* ${foundList.length}\n` +
+    `❌ *Not In Database:* ${notFoundList.length}\n` +
+    `💰 *Total Amount:* ₹${totalAmount.toFixed(2)}\n\n`;
+
+  if (foundList.length > 0) {
+    summary += `✅ *Found Orders:*\n`;
+    const previewCount = Math.min(foundList.length, 12);
+    for (let k = 0; k < previewCount; k++) {
+      const item = foundList[k];
+      const formIcon = item.step2 === 'Refund Form Filled' ? '✅' : '⏳';
+      const setIcon = item.step3 === 'Refund Completed' ? '✅' : '⏳';
+      summary += `${k + 1}. \`${item.orderId}\` — *${item.buyerName}* (₹${item.amount})\n   └ Date: ${item.orderDate} | Form: ${formIcon} | Pay: ${setIcon}\n`;
+    }
+    if (foundList.length > previewCount) {
+      summary += `_...and ${foundList.length - previewCount} more found orders (see CSV attached)_\n`;
+    }
+    summary += `\n`;
+  }
+
+  if (notFoundList.length > 0) {
+    summary += `❌ *Orders Not Found / Invalid (${notFoundList.length}):*\n`;
+    const previewNotFound = Math.min(notFoundList.length, 10);
+    for (let k = 0; k < previewNotFound; k++) {
+      summary += `• \`${notFoundList[k]}\`\n`;
+    }
+    if (notFoundList.length > previewNotFound) {
+      summary += `_...and ${notFoundList.length - previewNotFound} more (see CSV attached)_\n`;
+    }
+  }
+
+  // Update progress message with the final summary
+  if (progressMsgId) {
+    await editTelegram(chatId, progressMsgId, summary);
+  } else {
+    await sendTelegram(chatId, summary, replyToMessageId);
+  }
+
+  // Generate CSV Report
+  let csv = 'Order ID,Status,Buyer Name,Amount,Order Date,Step 1,Step 2 (Refund Form),Step 3 (Settlement)\n';
+  for (const item of foundList) {
+    csv += `"${item.orderId}","FOUND","${item.buyerName.replace(/"/g, '""')}","${item.amount}","${item.orderDate}","${item.step1}","${item.step2}","${item.step3}"\n`;
+  }
+  for (const id of notFoundList) {
+    csv += `"${id}","NOT FOUND","","","","","",""\n`;
+  }
+
+  const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const csvFileName = `batch_orders_report_${timestamp}.csv`;
+
+  await sendTelegramDocument(
+    chatId,
+    csv,
+    csvFileName,
+    `📄 Detailed CSV report for ${total} checked orders.`
+  );
+  console.log(`[Batch] Completed and sent CSV report for ${total} orders.`);
 }
 
 /**
@@ -269,7 +490,7 @@ async function startTelegramPolling() {
 
       for (const update of data.result) {
         offset = update.update_id + 1;
-        if (update.message && update.message.text) {
+        if (update.message) {
           handleIncomingMessage(update.message);
         }
       }
@@ -285,98 +506,74 @@ async function startTelegramPolling() {
  */
 async function handleIncomingMessage(msg) {
   const chatId = msg.chat.id;
-  const text = msg.text.trim();
   const userName = msg.from ? (msg.from.first_name || msg.from.username) : 'User';
 
-  console.log(`[Message] From ${userName} (${chatId}): "${text}"`);
+  // 1. Check for uploaded file (.txt or .csv)
+  if (msg.document) {
+    const doc = msg.document;
+    const isText = doc.file_name && (doc.file_name.endsWith('.txt') || doc.file_name.endsWith('.csv'));
+    if (isText) {
+      console.log(`[Message] Document received from ${userName}: ${doc.file_name}`);
+      await sendTelegram(chatId, `📥 *Reading file:* \`${doc.file_name}\`...`, msg.message_id);
+      try {
+        const fileContent = await getTelegramFileContent(doc.file_id);
+        const matches = [...new Set(fileContent.match(/\b\d{15,20}\b/g) || [])];
+        if (matches.length === 0) {
+          await sendTelegram(chatId, `⚠️ *No Order IDs found in file!* Please ensure it contains 15-20 digit order IDs.`, msg.message_id);
+          return;
+        }
+        await handleBatchOrders(chatId, matches, msg.message_id);
+      } catch (err) {
+        console.error('[Error] File read failed:', err);
+        await sendTelegram(chatId, `⚠️ *Error reading file:* ${err.message}`, msg.message_id);
+      }
+      return;
+    }
+  }
+
+  // 2. Check for text message
+  if (!msg.text) return;
+  const text = msg.text.trim();
+  console.log(`[Message] From ${userName} (${chatId}): "${text.slice(0, 100)}..."`);
 
   if (text === '/start' || text === '/help') {
     await sendTelegram(chatId,
       `👋 *Hello ${userName}!*\n\n` +
-      `Welcome to the *Order Tracking Bot*.\n\n` +
-      `📌 *How to use:*\n` +
-      `Simply send me an *Order ID* (for example: \`351692994041939520\`), and I'll fetch the live order status and buyer details from the master portal!`,
+      `Welcome to the *Order Tracking Bot* with **Batch Support**!\n\n` +
+      `📌 *Features:*\n` +
+      `• *Single Order Check:* Send one ID (e.g. \`351692994041939520\`) to get full details card.\n` +
+      `• *Batch Order Check:* Paste a list of multiple Order IDs at once, or upload a \`.txt\` / \`.csv\` file.\n` +
+      `• *Live Progress & CSV Export:* Live progress updates and an automatic downloadable CSV report for batch runs!`,
       msg.message_id
     );
     return;
   }
 
-  // Extract numeric order IDs (handles standalone or within text)
-  const matches = text.match(/\b\d{15,20}\b/g);
-  if (!matches || matches.length === 0) {
+  // Extract all 15-20 digit order IDs and remove duplicates
+  const rawMatches = text.match(/\b\d{15,20}\b/g);
+  if (!rawMatches || rawMatches.length === 0) {
     await sendTelegram(chatId,
-      `⚠️ *Invalid input!*\n\nPlease send a valid numeric Order ID (e.g. \`351692994041939520\`).`,
+      `⚠️ *Invalid input!*\n\nPlease send one or more valid numeric Order IDs (e.g. \`351692994041939520\`), or upload a .txt/.csv file.`,
       msg.message_id
     );
     return;
   }
 
-  // Process order IDs
-  for (const orderId of matches) {
-    const progressRes = await sendTelegram(chatId, `🔍 *Checking Order ID:* \`${orderId}\`...`, msg.message_id);
-    const progressMsgId = progressRes && progressRes.result ? progressRes.result.message_id : null;
+  const orderIds = [...new Set(rawMatches)];
 
-    try {
-      const res = await checkOrder(orderId);
-
-      if (!res || !res.success) {
-        const errorText = `⚠️ *Error querying portal:* ${res ? res.err : 'No response from portal'}`;
-        if (progressMsgId) await editTelegram(chatId, progressMsgId, errorText);
-        else await sendTelegram(chatId, errorText, msg.message_id);
-        continue;
-      }
-
-      if (res.res === 'Invalid Order ID' || !res.res) {
-        const notFoundText =
-          `❌ *Order Not Found*\n\n` +
-          `Order ID: \`${orderId}\` is *not in the database*.\n` +
-          `_Tip: It may belong to a newer batch not yet synced to the master sheet._`;
-        if (progressMsgId) await editTelegram(chatId, progressMsgId, notFoundText);
-        else await sendTelegram(chatId, notFoundText, msg.message_id);
-        continue;
-      }
-
-      const d = res.res;
-      const formStatus = (d.step2 === 'Refund Form Filled')
-        ? '✅ *Received & Verified*'
-        : `⏳ ${d.step2 || 'Pending'}`;
-
-      const settlementStatus = (d.step3 === 'Refund Completed')
-        ? '✅ *Completed*'
-        : (d.step3 && d.step3 !== 'Pending')
-          ? `⚠️ ${d.step3}`
-          : '⏳ Processing Payment';
-
-      const reply =
-        `📦 *Order Details*\n` +
-        `━━━━━━━━━━━━━━━━━━━━━━\n` +
-        `🆔 *Order ID:* \`${orderId}\`\n` +
-        `👤 *Buyer:* ${d.buyerName || 'N/A'}\n` +
-        `💰 *Amount:* ₹${d.amount || 0}\n` +
-        `📅 *Order Date:* ${d.orderDate || 'N/A'}\n\n` +
-        `📊 *Status Tracker:*\n` +
-        `1️⃣ *Order Status:* ✅ Confirmed\n` +
-        `2️⃣ *Refund Form:* ${formStatus}\n` +
-        `3️⃣ *Settlement:* ${settlementStatus}`;
-
-      if (progressMsgId) {
-        await editTelegram(chatId, progressMsgId, reply);
-      } else {
-        await sendTelegram(chatId, reply, msg.message_id);
-      }
-    } catch (err) {
-      console.error('[Error] Lookup failed for', orderId, err);
-      const failText = `⚠️ *Error:* Failed to fetch details for \`${orderId}\` (${err.message})`;
-      if (progressMsgId) await editTelegram(chatId, progressMsgId, failText);
-      else await sendTelegram(chatId, failText, msg.message_id);
-    }
+  if (orderIds.length === 1) {
+    // Single Order Mode
+    await handleSingleOrder(chatId, orderIds[0], msg.message_id);
+  } else {
+    // Batch Mode
+    await handleBatchOrders(chatId, orderIds, msg.message_id);
   }
 }
 
 // ==================== MAIN ====================
 async function main() {
   console.log('==============================================');
-  console.log('   Telegram Bot for Order Status Tracking     ');
+  console.log('   Telegram Bot - Order Status & Batch System ');
   console.log('==============================================');
 
   if (BOT_TOKEN === 'YOUR_BOT_TOKEN_HERE') {

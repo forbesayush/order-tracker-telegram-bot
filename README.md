@@ -1,25 +1,27 @@
 # Order Tracker Telegram Bot
 
-A Telegram Bot that queries and tracks live order status, buyer information, and refund/settlement milestones from a Google Apps Script Master Portal in real-time.
+A high-performance Telegram Bot that queries and tracks live order status, buyer information, and refund/settlement milestones from a Google Apps Script Master Portal in real-time.
 
-Built using Node.js and Chrome DevTools Protocol (CDP) for high-performance, headless browser communication.
-
----
-
-## Features
-
-- **Live Order Lookup:** Send any Order ID (e.g. `351692994041939520`) to the bot to retrieve live data directly from the master sheet portal.
-- **Smart ID Extraction:** Detects 15–20 digit numeric Order IDs whether sent standalone or within sentences/notes.
-- **Detailed Progress Tracker:**
-  -  **Order Confirmation** (Date & Status)
-  -  **Refund Form** (Submission & Verification Status)
-  -  **Final Settlement** (Payment verification & completion)
-- **Zero Heavy Dependencies:** Uses native Node.js capabilities (`fetch`, `WebSocket`, `child_process`).
-- **Cross-Platform:** Runs seamlessly on Windows, macOS, Linux, and Docker.
+Built with Node.js and Chrome DevTools Protocol (CDP).
 
 ---
 
-## Quick Start (Local Setup)
+## 🚀 Features
+
+- **Single Order Check:** Send any Order ID (e.g. `351692994041939520`) to get a full order status card.
+- **⚡ Batch Order Check System:**
+  - Paste any number of Order IDs in a single message (multi-line, comma-separated, or text blocks).
+  - Automatically deduplicates and extracts 15–20 digit numeric IDs.
+  - **Live Progress Updates:** Real-time progress bar (`⏳ Checked: 8/17 (47%)...`).
+  - **Batch Summary Report:** Clean breakdown with total checked, count found, count missing, and total amount.
+  - **📄 Automatic CSV Export:** Generates and uploads a downloadable `.csv` file to the chat with all details for Excel/Google Sheets.
+- **📁 File Upload Support:** Upload a `.txt` or `.csv` file with Order IDs, and the bot will parse and batch-check every order automatically.
+- **Zero Heavy Dependencies:** Uses native Node.js capabilities (`fetch`, `WebSocket`, `FormData`, `child_process`).
+- **Cross-Platform & Docker Ready:** Ready to run locally or 24/7 on cloud hosting.
+
+---
+
+## 🛠️ Quick Start (Local Setup)
 
 ### Prerequisites
 - [Node.js 18+](https://nodejs.org/) installed
@@ -44,7 +46,7 @@ Built using Node.js and Chrome DevTools Protocol (CDP) for high-performance, hea
      "bot_token": "YOUR_ACTUAL_TELEGRAM_BOT_TOKEN"
    }
    ```
-   *(Alternatively, set the environment variable: `TELEGRAM_BOT_TOKEN="your_token"`)*
+   *(Or pass as environment variable: `TELEGRAM_BOT_TOKEN="your_token"`)*
 
 3. **Start the Bot:**
    - **Windows:** Double-click `run.bat` or run:
@@ -58,7 +60,7 @@ Built using Node.js and Chrome DevTools Protocol (CDP) for high-performance, hea
 
 ---
 
-## 24/7 Cloud Hosting (Docker)
+## ☁️ 24/7 Cloud Hosting (Docker)
 
 To run the bot 24/7 on a cloud VPS (e.g., DigitalOcean, Hetzner, Render, Railway, or AWS):
 
@@ -75,10 +77,10 @@ To run the bot 24/7 on a cloud VPS (e.g., DigitalOcean, Hetzner, Render, Railway
 
 ---
 
-## Project Structure
+## 📁 Project Structure
 
 ```
-├── bot.js               # Main bot logic and Chrome CDP runner
+├── bot.js               # Bot logic, Batch Engine, and Chrome CDP runner
 ├── config.example.json  # Configuration template
 ├── run.bat              # Windows one-click launcher
 ├── Dockerfile           # Production Docker container definition
