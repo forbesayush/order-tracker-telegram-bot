@@ -3,12 +3,6 @@
  *
  * Connects to Telegram via long-polling and queries the Google Apps Script
  * Master Order Status portal in real-time using headless Chrome DevTools Protocol.
- *
- * Supports:
- * - Single Order Check (detailed card)
- * - Batch Order Check (multi-line paste, list, or uploaded .txt/.csv file)
- * - Live progress tracking
- * - Automatic CSV report generation & upload
  */
 
 const { spawn } = require('child_process');
@@ -169,13 +163,24 @@ async function checkOrder(orderId, retryCount = 1) {
     const evalResult = await sendCDP(wsIframe, 'Runtime.evaluate', {
       expression: `
         new Promise((resolve) => {
+          const timeout = setTimeout(() => {
+            resolve({ success: false, err: 'Portal request timed out (12s)' });
+          }, 12000);
+
           try {
             const win = document.getElementById('userHtmlFrame').contentWindow;
             win.google.script.run
-              .withSuccessHandler(res => resolve({ success: true, res }))
-              .withFailureHandler(err => resolve({ success: false, err: err ? (err.message || JSON.stringify(err)) : 'Unknown script error' }))
+              .withSuccessHandler(res => {
+                clearTimeout(timeout);
+                resolve({ success: true, res });
+              })
+              .withFailureHandler(err => {
+                clearTimeout(timeout);
+                resolve({ success: false, err: err ? (err.message || JSON.stringify(err)) : 'Unknown script error' });
+              })
               .checkStatus(${JSON.stringify(orderId)});
           } catch(e) {
+            clearTimeout(timeout);
             resolve({ success: false, err: e.toString() });
           }
         })
@@ -352,7 +357,7 @@ async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
   // Initial progress notice
   const progressRes = await sendTelegram(
     chatId,
-    `🔄 *Batch Check Started*\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Total Orders: *${total}*\n⏳ Progress: 0/${total} (0%)\n\n_Please wait, checking database in real-time..._`,
+    `🔄 *Batch Check Started*\n━━━━━━━━━━━━━━━━━━━━━━\n📦 Total Orders: *${total}*\n⏳ Progress: 0/${total} (0%)\n\n_Checking database in real-time..._`,
     replyToMessageId
   );
   const progressMsgId = progressRes && progressRes.result ? progressRes.result.message_id : null;
@@ -379,14 +384,17 @@ async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
           step2: d.step2 || 'Pending',
           step3: d.step3 || 'Pending'
         });
+        console.log(`[Batch] [${i + 1}/${total}] ${orderId} -> FOUND (${d.buyerName})`);
       } else {
         notFoundList.push(orderId);
+        console.log(`[Batch] [${i + 1}/${total}] ${orderId} -> NOT FOUND`);
       }
     } catch (err) {
       notFoundList.push(orderId);
+      console.log(`[Batch] [${i + 1}/${total}] ${orderId} -> ERROR (${err.message})`);
     }
 
-    // Update progress message periodically (every 3 items or every 2 seconds to avoid Telegram rate limits)
+    // Update progress periodically (every 2-3 items or ~2.5s)
     const now = Date.now();
     const isLast = i === total - 1;
     if (progressMsgId && (now - lastEditTime > 2500 || isLast)) {
@@ -399,7 +407,7 @@ async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
       );
     }
 
-    await sleep(250); // slight breathing room between calls
+    await sleep(200);
   }
 
   // Build the Final Batch Summary Message
@@ -421,7 +429,7 @@ async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
       summary += `${k + 1}. \`${item.orderId}\` — *${item.buyerName}* (₹${item.amount})\n   └ Date: ${item.orderDate} | Form: ${formIcon} | Pay: ${setIcon}\n`;
     }
     if (foundList.length > previewCount) {
-      summary += `_...and ${foundList.length - previewCount} more found orders (see CSV attached)_\n`;
+      summary += `_...and ${foundList.length - previewCount} more found orders (see attached CSV)_\n`;
     }
     summary += `\n`;
   }
@@ -433,7 +441,7 @@ async function handleBatchOrders(chatId, orderIds, replyToMessageId) {
       summary += `• \`${notFoundList[k]}\`\n`;
     }
     if (notFoundList.length > previewNotFound) {
-      summary += `_...and ${notFoundList.length - previewNotFound} more (see CSV attached)_\n`;
+      summary += `_...and ${notFoundList.length - previewNotFound} more (see attached CSV)_\n`;
     }
   }
 
